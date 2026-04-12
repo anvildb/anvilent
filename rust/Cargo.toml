@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Official Rust client driver for Anvil DB"
+authors = ["Benjamin C. Tehan <purphoros@devforge.org>"]
 repository = "https://github.com/anvildb/anvilent"
 keywords = ["anvil", "graph-database", "cypher", "driver"]
 categories = ["database"]
