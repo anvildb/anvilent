@@ -2,6 +2,7 @@
   "name": "anvilent",
   "version": "0.1.0",
   "description": "Official TypeScript/JavaScript client driver for Anvil DB",
+  "author": "Benjamin C. Tehan",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
