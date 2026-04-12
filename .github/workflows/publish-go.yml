@@ -1,0 +1,23 @@
+name: Publish Go
+
+on:
+  push:
+    tags: ['go/v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - run: go build ./...
+      - run: go test ./...
+      - name: Prime Go module proxy
+        run: |
+          VERSION="${GITHUB_REF_NAME#go/}"
+          curl -fsSL "https://proxy.golang.org/github.com/anvildb/anvilent/go/@v/${VERSION}.info"
