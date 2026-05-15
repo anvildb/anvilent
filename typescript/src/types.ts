@@ -192,6 +192,233 @@ export interface EventsResponse {
   total: number;
 }
 
+// ---- Storage --------------------------------------------------------------
+
+/** Options accepted by `storage.createBucket()`. */
+export interface CreateBucketOptions {
+  /** When true, the bucket is anonymously readable via `getPublicUrl`. */
+  public?: boolean;
+  /**
+   * Max upload size per object. Accepts either a number of bytes or a
+   * human-readable suffix string ("5MB", "1GiB", "200KB").
+   */
+  fileSizeLimit?: number | string;
+  /** Cap on total bytes across all objects in this bucket. */
+  bucketSizeLimit?: number | string;
+  /** Whitelist of MIME types. Empty array means "anything goes". */
+  allowedMimeTypes?: string[];
+}
+
+/** Options accepted by `storage.updateBucket()`. */
+export interface UpdateBucketOptions {
+  public?: boolean;
+  /** Pass `null` to clear the limit. */
+  fileSizeLimit?: number | string | null;
+  /** Pass `null` to clear the limit. */
+  bucketSizeLimit?: number | string | null;
+  allowedMimeTypes?: string[];
+}
+
+/** A bucket as returned by `GET /storage/v1/bucket`. */
+export interface Bucket {
+  id: string;
+  name: string;
+  public: boolean;
+  fileSizeLimit: number | null;
+  bucketSizeLimit: number | null;
+  allowedMimeTypes: string[];
+  owner: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Options accepted by `bucket.upload()`. */
+export interface UploadOptions {
+  /** Overrides the auto-detected MIME type. */
+  contentType?: string;
+  /** When true, replaces any existing object at the same path. */
+  upsert?: boolean;
+  /** Optional `Cache-Control` header set on the upload request. */
+  cacheControl?: string;
+}
+
+/** Progress callback payload for resumable uploads. */
+export interface UploadProgress {
+  /** Bytes uploaded so far. */
+  loaded: number;
+  /** Total bytes to upload. */
+  total: number;
+  /** Convenience: `loaded / total * 100`, rounded to two decimals. */
+  percent: number;
+}
+
+/** Options accepted by `bucket.uploadResumable()`. */
+export interface ResumableUploadOptions {
+  /** Overrides the auto-detected MIME type. */
+  contentType?: string;
+  /** Bytes per PATCH chunk. Defaults to 5 MiB. */
+  chunkSize?: number;
+  /** Callback fired after every successful chunk. */
+  onProgress?: (progress: UploadProgress) => void;
+  /**
+   * Resume from an existing TUS session by URL. When set, the client
+   * issues a HEAD against this URL to discover the server's offset
+   * before sending any PATCH requests.
+   */
+  resumeFrom?: string;
+  /**
+   * AbortSignal that aborts the in-flight upload. Closing the underlying
+   * session afterwards is the caller's responsibility (use `abort()` to
+   * issue a TUS DELETE).
+   */
+  signal?: AbortSignal;
+}
+
+/** Result returned by both single-shot and resumable uploads. */
+export interface UploadResult {
+  /** Server-assigned object UUID. */
+  id: string;
+  bucketId: string;
+  /** Path within the bucket. */
+  path: string;
+  /** Last path segment of `path`. */
+  name: string;
+  mimeType: string;
+  size: number;
+  etag: string;
+  contentHash: string;
+  /** Version counter, bumped on every overwrite. */
+  version: number;
+  /** True when the bytes deduplicated against an existing backend blob. */
+  deduped: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Detailed object metadata returned by copy/move endpoints. */
+export interface ObjectMetadata extends UploadResult {
+  metadata: Record<string, unknown>;
+  owner: string;
+  lastAccessedAt: number;
+}
+
+/** Image transformation options accepted by `getPublicUrl` / `createSignedUrl`. */
+export interface ImageTransform {
+  width?: number;
+  height?: number;
+  resize?: "cover" | "contain" | "fill" | (string & {});
+  format?: "webp" | "jpeg" | "png" | "avif" | (string & {});
+  quality?: number;
+}
+
+/** Options accepted by `bucket.getPublicUrl()`. */
+export interface PublicUrlOptions {
+  /** Image transformation parameters; routes via `/render/image/public`. */
+  transform?: ImageTransform;
+  /**
+   * When set, forces the server to return `Content-Disposition: attachment`
+   * with this filename. Browsers will save instead of preview.
+   */
+  download?: boolean | string;
+}
+
+/** Result of `getPublicUrl`. */
+export interface PublicUrlResult {
+  publicUrl: string;
+}
+
+/** Options accepted by `bucket.createSignedUrl()`. */
+export interface SignedUrlOptions {
+  /** Image transformation parameters. */
+  transform?: ImageTransform;
+  /** When set, the server adds a `download` query param to the URL. */
+  download?: boolean | string;
+}
+
+/** Result of `createSignedUrl`. */
+export interface SignedUrlResult {
+  /** Absolute URL the caller can fetch. */
+  signedUrl: string;
+  /** Just the opaque token portion of the URL. */
+  token: string;
+  /** Unix-seconds expiry timestamp. */
+  expiresAt: number;
+  /** Effective TTL in seconds after server-side clamping. */
+  expiresIn: number;
+}
+
+/** Options accepted by `bucket.createSignedUploadUrl()`. */
+export interface SignedUploadUrlOptions {
+  /** TTL in seconds. `0` (default) means "use the server default". */
+  expiresIn?: number;
+}
+
+/** Result of `createSignedUploadUrl`. */
+export interface SignedUploadUrlResult {
+  signedUrl: string;
+  token: string;
+  expiresAt: number;
+  expiresIn: number;
+}
+
+/** Options accepted by `bucket.list()`. */
+export interface ListOptions {
+  /** Max items returned. Server clamps to 1000. Defaults to 100. */
+  limit?: number;
+  /** Page offset. */
+  offset?: number;
+  /** Sort field and direction. */
+  sortBy?: {
+    column: "name" | "size" | "created_at" | "updated_at" | (string & {});
+    order?: "asc" | "desc";
+  };
+}
+
+/** A single row from `bucket.list()`. */
+export interface FileObject {
+  path: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  etag: string;
+  contentHash: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Result of `bucket.list()`. */
+export interface ListResult {
+  bucketId: string;
+  items: FileObject[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** Per-bucket usage row from `storage.getUsage()`. */
+export interface BucketUsage {
+  bucketId: string;
+  objectCount: number;
+  totalBytes: number;
+  bucketSizeLimit?: number;
+}
+
+/** Per-user usage row from `storage.getUsage()`. */
+export interface UserUsage {
+  owner: string;
+  objectCount: number;
+  totalBytes: number;
+}
+
+/** Result of `storage.getUsage()`. */
+export interface UsageReport {
+  objectCount: number;
+  totalBytes: number;
+  buckets: BucketUsage[];
+  users: UserUsage[];
+  maxTotalStorage?: number;
+}
+
 // ---- Import ---------------------------------------------------------------
 
 /** Body for `POST /db/import/cypher`. */

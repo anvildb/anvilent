@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 if TYPE_CHECKING:
     from typing import Self
+
+    from .storage import AsyncStorage, Storage
 
 import httpx
 
@@ -195,6 +197,68 @@ class AnvilClient:
             )
         _check_response(resp)
         return resp
+
+    # -- storage plumbing ---------------------------------------------------
+
+    def _storage_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes | None = b"",
+        json: Any = None,
+        headers: dict[str, str] | None = None,
+        _retry_auth: bool = True,
+    ) -> httpx.Response:
+        """Authenticated raw request used by the storage namespace.
+
+        Differs from :meth:`_request` in three ways:
+        - returns the response even for 4xx / 5xx so callers can branch on
+          status (HEAD exists-checks, 404 misses in batch delete, etc.).
+        - accepts raw ``content`` bytes for binary uploads.
+        - falls through to a per-call header dict so the caller can set
+          Content-Type, TUS headers, etc.
+        """
+        request_headers = dict(headers or {})
+        request_headers.update(self._headers())
+        resp = self._client.request(
+            method,
+            path,
+            content=content,
+            json=json,
+            headers=request_headers,
+        )
+        if resp.status_code == 401 and _retry_auth and self._refresh_token:
+            self._do_refresh()
+            request_headers = dict(headers or {})
+            request_headers.update(self._headers())
+            resp = self._client.request(
+                method,
+                path,
+                content=content,
+                json=json,
+                headers=request_headers,
+            )
+        return resp
+
+    def _storage_stream(self, method: str, path: str) -> Iterator[bytes]:
+        """Stream a response body as a synchronous iterator of byte chunks."""
+        with self._client.stream(method, path, headers=self._headers()) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                _check_response(resp)
+            yield from resp.iter_bytes()
+
+    @property
+    def storage(self) -> "Storage":
+        """File storage namespace (Phase 25.13)."""
+        cached = getattr(self, "_storage_ns", None)
+        if cached is None:
+            from .storage import Storage
+
+            cached = Storage(self)
+            self._storage_ns = cached
+        return cached
 
     def _do_refresh(self) -> None:
         resp = self._client.post(
@@ -797,6 +861,61 @@ class AsyncAnvilClient:
             )
         _check_response(resp)
         return resp
+
+    # -- storage plumbing ---------------------------------------------------
+
+    async def _storage_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes | None = b"",
+        json: Any = None,
+        headers: dict[str, str] | None = None,
+        _retry_auth: bool = True,
+    ) -> httpx.Response:
+        """Authenticated raw request used by the async storage namespace."""
+        request_headers = dict(headers or {})
+        request_headers.update(self._headers())
+        resp = await self._client.request(
+            method,
+            path,
+            content=content,
+            json=json,
+            headers=request_headers,
+        )
+        if resp.status_code == 401 and _retry_auth and self._refresh_token:
+            await self._do_refresh()
+            request_headers = dict(headers or {})
+            request_headers.update(self._headers())
+            resp = await self._client.request(
+                method,
+                path,
+                content=content,
+                json=json,
+                headers=request_headers,
+            )
+        return resp
+
+    async def _storage_stream(self, method: str, path: str) -> AsyncIterator[bytes]:
+        """Stream a response body as an async iterator of byte chunks."""
+        async with self._client.stream(method, path, headers=self._headers()) as resp:
+            if resp.status_code >= 400:
+                await resp.aread()
+                _check_response(resp)
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+
+    @property
+    def storage(self) -> "AsyncStorage":
+        """Async file storage namespace (Phase 25.13)."""
+        cached = getattr(self, "_storage_ns", None)
+        if cached is None:
+            from .storage import AsyncStorage
+
+            cached = AsyncStorage(self)
+            self._storage_ns = cached
+        return cached
 
     async def _do_refresh(self) -> None:
         resp = await self._client.post(

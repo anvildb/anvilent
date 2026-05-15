@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { AnvilError } from "./errors.js";
+import { Storage } from "./storage.js";
 import type {
   AnvilClientOptions,
   BatchRequest,
@@ -129,6 +130,9 @@ export class AnvilClient {
   // Refresh deduplication — only one in-flight refresh at a time.
   private _refreshPromise: Promise<void> | undefined;
 
+  // Lazy-initialized namespaces ----------------------------------------------
+  private _storage: Storage | undefined;
+
   // --------------------------------------------------------------------------
   // Construction
   // --------------------------------------------------------------------------
@@ -253,6 +257,71 @@ export class AnvilClient {
     }
 
     return (await response.json()) as T;
+  }
+
+  /**
+   * Authenticated raw fetch. Adds the bearer token, applies the default
+   * timeout, retries once after a 401 by refreshing the token, then returns
+   * the raw {@link Response} so callers can stream bodies or read custom
+   * response headers (e.g. TUS `Location` / `Upload-Offset`).
+   *
+   * Non-2xx responses are NOT thrown — the caller decides how to react to
+   * status codes, which matters for `HEAD` checks and `409` upsert conflicts.
+   *
+   * @internal
+   */
+  private async _rawRequest(
+    method: string,
+    path: string,
+    init: {
+      headers?: Record<string, string>;
+      body?: BodyInit;
+      signal?: AbortSignal;
+    } = {},
+    _isRetry = false,
+  ): Promise<Response> {
+    const url = `${this._baseUrl}${path}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
+    const externalAbort = () => controller.abort();
+    init.signal?.addEventListener("abort", externalAbort);
+
+    const headers: Record<string, string> = { ...(init.headers ?? {}) };
+    if (this._accessToken && !headers["Authorization"]) {
+      headers["Authorization"] = `Bearer ${this._accessToken}`;
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: init.body,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      init.signal?.removeEventListener("abort", externalAbort);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        if (init.signal?.aborted) {
+          throw new AnvilError("Request aborted by caller");
+        }
+        throw new AnvilError(`Request timed out after ${this._timeoutMs}ms`);
+      }
+      throw new AnvilError(
+        err instanceof Error ? err.message : "Network request failed",
+      );
+    } finally {
+      clearTimeout(timer);
+      init.signal?.removeEventListener("abort", externalAbort);
+    }
+
+    if (response.status === 401 && !_isRetry && this._refreshToken) {
+      await this._performRefresh();
+      return this._rawRequest(method, path, init, true);
+    }
+
+    return response;
   }
 
   /**
@@ -725,5 +794,28 @@ export class AnvilClient {
   async importCypher(script: string): Promise<unknown> {
     const body: ImportCypherRequest = { script };
     return this._request<unknown>("POST", "/db/import/cypher", body);
+  }
+
+  // --------------------------------------------------------------------------
+  // Storage namespace (Phase 25.13)
+  // --------------------------------------------------------------------------
+
+  /**
+   * File storage namespace. Bucket-level operations live here; per-bucket
+   * object operations live on the {@link StorageBucketBuilder} returned by
+   * `client.storage.from("bucket-id")`.
+   *
+   * @example
+   * ```ts
+   * await client.storage.createBucket("avatars", { public: true });
+   * await client.storage.from("avatars").upload("alice.png", blob);
+   * const { publicUrl } = client.storage.from("avatars").getPublicUrl("alice.png");
+   * ```
+   */
+  get storage(): Storage {
+    if (!this._storage) {
+      this._storage = new Storage(this);
+    }
+    return this._storage;
   }
 }

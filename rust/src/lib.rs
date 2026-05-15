@@ -45,10 +45,18 @@
 pub mod client;
 pub mod error;
 pub mod models;
+pub mod storage;
 pub mod uri;
 
 // Re-export primary types at the crate root for convenience.
 pub use client::{AnvilClient, Transaction};
 pub use error::{AnvilError, AnvilResult};
 pub use models::*;
+pub use storage::{
+    Bucket, BucketUsage, CreateBucketOptions, Download, FileObject, ImageTransform, ListOptions,
+    ListResult, ObjectMetadata, PublicUrlOptions, PublicUrlResult, ResumableUploadOptions,
+    ResumableUploadResult, SignedUploadUrlOptions, SignedUploadUrlResult, SignedUrlOptions,
+    SignedUrlResult, SizeLimit, SortBy, SortOrder, Storage, StorageBucketBuilder,
+    UpdateBucketOptions, UploadOptions, UploadProgress, UploadResult, UsageReport, UserUsage,
+};
 pub use uri::AnvilUri;

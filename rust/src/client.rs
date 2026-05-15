@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use reqwest::header::HeaderMap;
+use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::RwLock;
@@ -124,7 +125,71 @@ impl AnvilClient {
     // -----------------------------------------------------------------------
 
     fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.inner.base_url)
+        if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            format!("{}{path}", self.inner.base_url)
+        }
+    }
+
+    /// Base URL the client was constructed with. Used by the storage
+    /// namespace to build absolute public / signed URLs without re-parsing.
+    pub fn base_url(&self) -> &str {
+        &self.inner.base_url
+    }
+
+    /// Send a JSON-bodied request and return the raw `Response` so callers
+    /// can branch on status before deserializing. Inherits the same
+    /// `Authorization` header + 401 retry behavior as the other helpers.
+    pub(crate) async fn send_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        extra_headers: Option<HeaderMap>,
+    ) -> AnvilResult<Response> {
+        let url = self.url(path);
+        let method_for_build = method.clone();
+        let body_for_build = body.clone();
+        let headers_for_build = extra_headers.clone();
+        self.send_with_retry(move || {
+            let mut req = self.inner.http.request(method_for_build.clone(), url.clone());
+            if let Some(ref h) = headers_for_build {
+                req = req.headers(h.clone());
+            }
+            if let Some(ref b) = body_for_build {
+                req = req.json(b);
+            }
+            req
+        })
+        .await
+    }
+
+    /// Send a raw-bytes request and return the raw `Response`. The
+    /// `Content-Type` is whatever the caller sets in `extra_headers` — we
+    /// don't inject JSON-ness here.
+    pub(crate) async fn send_bytes(
+        &self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+        extra_headers: Option<HeaderMap>,
+    ) -> AnvilResult<Response> {
+        let url = self.url(path);
+        let method_for_build = method.clone();
+        let headers_for_build = extra_headers.clone();
+        // Buffer the body so the retry closure can hand the same bytes to
+        // both attempts. Cheap clones via Vec<u8>::clone().
+        let body_for_build = body;
+        self.send_with_retry(move || {
+            let mut req = self.inner.http.request(method_for_build.clone(), url.clone());
+            if let Some(ref h) = headers_for_build {
+                req = req.headers(h.clone());
+            }
+            req = req.body(body_for_build.clone());
+            req
+        })
+        .await
     }
 
     async fn apply_auth(&self, req: RequestBuilder) -> RequestBuilder {
@@ -617,6 +682,19 @@ impl AnvilClient {
     // -----------------------------------------------------------------------
     // Transactions
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Storage (Phase 25.13)
+    // -----------------------------------------------------------------------
+
+    /// File storage namespace. Bucket-level operations live on the returned
+    /// [`Storage`], per-bucket object operations live on the
+    /// [`StorageBucketBuilder`] returned by `client.storage().from("…")`.
+    pub fn storage(&self) -> crate::storage::Storage {
+        crate::storage::Storage {
+            client: self.clone(),
+        }
+    }
 
     /// Begin a new transaction and return a [`Transaction`] handle.
     ///
