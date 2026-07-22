@@ -624,12 +624,20 @@ export class AnvilClient {
    * Create a new document collection.
    *
    * @param collection - The collection name.
+   * @param options    - Optional `compositeKeys` / `defaultTtlMs` settings.
    * @returns The created collection descriptor.
    */
-  async createCollection(collection: string): Promise<Collection> {
+  async createCollection(
+    collection: string,
+    options: { compositeKeys?: boolean; defaultTtlMs?: number } = {},
+  ): Promise<Collection> {
+    const body: Record<string, unknown> = {};
+    if (options.compositeKeys !== undefined) body.composite_keys = options.compositeKeys;
+    if (options.defaultTtlMs !== undefined) body.default_ttl_ms = options.defaultTtlMs;
     return this._request<Collection>(
       "POST",
       `/docs/${encodeURIComponent(collection)}`,
+      body,
     );
   }
 
@@ -646,37 +654,54 @@ export class AnvilClient {
   }
 
   /**
-   * Get a single document by ID.
+   * Get a single document by ID. Returns the document body merged with its
+   * server-assigned key/metadata.
    *
    * @param collection - The collection name.
    * @param id         - The document ID.
-   * @returns The document.
    */
   async getDocument(collection: string, id: string): Promise<Document> {
-    return this._request<Document>(
+    const raw = await this._request<RawDocumentResponse>(
       "GET",
       `/docs/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
     );
+    return unwrapDocument(raw);
   }
 
   /**
    * Create or replace a document.
    *
+   * The server expects the document under a `body` field plus optional
+   * `sort_key` / `ttl_ms` / `if_not_exists` / `if_version` flags — we wrap
+   * here so callers can keep passing flat bodies.
+   *
    * @param collection - The collection name.
    * @param id         - The document ID.
    * @param body       - The document body.
-   * @returns The stored document.
+   * @param options    - Optional sort key, TTL, or conditional-write flags.
    */
   async putDocument(
     collection: string,
     id: string,
     body: Record<string, unknown>,
+    options: {
+      sortKey?: unknown;
+      ttlMs?: number;
+      ifNotExists?: boolean;
+      ifVersion?: number;
+    } = {},
   ): Promise<Document> {
-    return this._request<Document>(
+    const payload: Record<string, unknown> = { body };
+    if (options.sortKey !== undefined) payload.sort_key = options.sortKey;
+    if (options.ttlMs !== undefined) payload.ttl_ms = options.ttlMs;
+    if (options.ifNotExists !== undefined) payload.if_not_exists = options.ifNotExists;
+    if (options.ifVersion !== undefined) payload.if_version = options.ifVersion;
+    const raw = await this._request<RawDocumentResponse>(
       "PUT",
       `/docs/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-      body,
+      payload,
     );
+    return unwrapDocument(raw);
   }
 
   /**
@@ -695,19 +720,33 @@ export class AnvilClient {
   /**
    * Query documents in a collection using a filter.
    *
+   * Accepts the shorthand `{ filter: { field: value, ... } }` and translates
+   * it into the server's tagged FilterExpr — an AND of `eq` clauses — so
+   * callers don't have to construct the expression by hand. Pre-built
+   * FilterExpr objects pass through unchanged.
+   *
    * @param collection - The collection name.
    * @param request    - Query filter and pagination options.
-   * @returns Matching documents.
+   * @returns Matching documents (body content, with metadata merged in).
    */
   async queryDocuments(
     collection: string,
     request: DocumentQueryRequest,
   ): Promise<DocumentQueryResult> {
-    return this._request<DocumentQueryResult>(
+    const payload: Record<string, unknown> = { ...request };
+    if (request.filter && !("op" in request.filter)) {
+      payload.filter = filterMapToExpr(request.filter as Record<string, unknown>);
+    }
+    const raw = await this._request<RawQueryResponse>(
       "POST",
       `/docs/${encodeURIComponent(collection)}/query`,
-      request,
+      payload,
     );
+    return {
+      documents: (raw.documents ?? []).map(unwrapDocument),
+      count: raw.count ?? 0,
+      ...(raw.cursor !== undefined ? { cursor: raw.cursor } : {}),
+    };
   }
 
   /**
@@ -717,10 +756,15 @@ export class AnvilClient {
    * @returns All documents in the collection.
    */
   async scanDocuments(collection: string): Promise<DocumentQueryResult> {
-    return this._request<DocumentQueryResult>(
+    const raw = await this._request<RawQueryResponse>(
       "GET",
       `/docs/${encodeURIComponent(collection)}/scan`,
     );
+    return {
+      documents: (raw.documents ?? []).map(unwrapDocument),
+      count: raw.count ?? 0,
+      ...(raw.cursor !== undefined ? { cursor: raw.cursor } : {}),
+    };
   }
 
   /**
@@ -818,4 +862,64 @@ export class AnvilClient {
     }
     return this._storage;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Document helpers
+//
+// The server returns documents as `{ id, collection, key, body, ... }`,
+// where the user-controlled fields live under `body`. The SDK presents the
+// flatter shape `{ id, ...body, _key, _collection, ... }` so callers can
+// reach payload fields directly without touching `.body` on every access.
+// ---------------------------------------------------------------------------
+
+interface RawDocumentResponse {
+  id: number;
+  collection: string;
+  key: string;
+  body: Record<string, unknown>;
+  expires_at?: number;
+  created_at?: number;
+  updated_at?: number;
+}
+
+interface RawQueryResponse {
+  documents: RawDocumentResponse[];
+  count: number;
+  cursor?: string;
+}
+
+function unwrapDocument(raw: RawDocumentResponse): Document {
+  const body = raw.body ?? {};
+  // The body's own `id` field wins over the server-assigned numeric id —
+  // typical payloads carry their domain UUID under `id`.
+  const merged: Record<string, unknown> = {
+    ...body,
+    _key: raw.key,
+    _collection: raw.collection,
+    _server_id: raw.id,
+    ...(raw.created_at !== undefined ? { _created_at: raw.created_at } : {}),
+    ...(raw.updated_at !== undefined ? { _updated_at: raw.updated_at } : {}),
+    ...(raw.expires_at !== undefined ? { _expires_at: raw.expires_at } : {}),
+  };
+  if (merged.id === undefined) merged.id = raw.key;
+  return merged as Document;
+}
+
+/**
+ * Translate the shorthand `{ field: value, ... }` filter map into the
+ * server's tagged FilterExpr — a single `eq` clause if there's one field,
+ * an `and` of `eq` clauses otherwise.
+ */
+function filterMapToExpr(filter: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(filter);
+  if (entries.length === 0) return { op: "and", conditions: [] };
+  if (entries.length === 1) {
+    const [field, value] = entries[0]!;
+    return { op: "eq", field, value };
+  }
+  return {
+    op: "and",
+    conditions: entries.map(([field, value]) => ({ op: "eq", field, value })),
+  };
 }
