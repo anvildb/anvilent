@@ -354,7 +354,9 @@ export class AnvilClient {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify({ refreshToken: this._refreshToken }),
+        // The server deserializes `refresh_token` (snake_case). Sending the
+        // camelCase response field back verbatim 422s and breaks refresh.
+        body: JSON.stringify({ refresh_token: this._refreshToken }),
         signal: controller.signal,
       });
     } catch {
@@ -428,7 +430,12 @@ export class AnvilClient {
    * @param payload - Current and new passwords.
    */
   async changePassword(payload: ChangePasswordRequest): Promise<void> {
-    await this._request<void>("POST", "/auth/change-password", payload);
+    // The server expects snake_case (`current_password` / `new_password`);
+    // the SDK keeps the idiomatic camelCase surface and translates here.
+    await this._request<void>("POST", "/auth/change-password", {
+      current_password: payload.currentPassword,
+      new_password: payload.newPassword,
+    });
   }
 
   /**

@@ -137,6 +137,23 @@ describe("AnvilClient", () => {
     });
   });
 
+  describe("changePassword", () => {
+    it("sends snake_case current_password/new_password", async () => {
+      const { calls } = installFetch([
+        () => jsonResponse({ accessToken: "a", refreshToken: "r", idToken: "id" }),
+        () => jsonResponse({}),
+      ]);
+
+      const client = new AnvilClient({ baseUrl: "http://localhost:7474" });
+      await client.login({ username: "u", password: "p" });
+      await client.changePassword({ currentPassword: "old", newPassword: "new" });
+
+      expect(calls[1]?.url).toBe("http://localhost:7474/auth/change-password");
+      // The server deserializes snake_case; camelCase 422s.
+      expect(calls[1]?.body).toEqual({ current_password: "old", new_password: "new" });
+    });
+  });
+
   describe("query", () => {
     it("sends the Cypher body and default database", async () => {
       const { calls } = installFetch([
@@ -273,7 +290,8 @@ describe("AnvilClient", () => {
       expect(calls).toHaveLength(4);
       expect(calls[1]?.headers["authorization"]).toBe("Bearer old-access");
       expect(calls[2]?.url).toBe("http://localhost:7474/auth/refresh");
-      expect(calls[2]?.body).toEqual({ refreshToken: "old-refresh" });
+      // The server deserializes snake_case; camelCase 422s.
+      expect(calls[2]?.body).toEqual({ refresh_token: "old-refresh" });
       expect(calls[3]?.headers["authorization"]).toBe("Bearer new-access");
     });
 
@@ -423,7 +441,8 @@ describe("AnvilClient", () => {
       expect(calls[4]).toMatchObject({
         method: "PUT",
         url: "http://localhost:7474/docs/posts/1",
-        body: { title: "hello" },
+        // putDocument wraps the flat body in the server's { body } envelope.
+        body: { body: { title: "hello" } },
       });
       expect(calls[5]).toMatchObject({
         method: "DELETE",
@@ -432,7 +451,9 @@ describe("AnvilClient", () => {
       expect(calls[6]).toMatchObject({
         method: "POST",
         url: "http://localhost:7474/docs/posts/query",
-        body: { filter: { title: "hello" } },
+        // The shorthand { title: "hello" } filter is translated to a tagged
+        // FilterExpr (a single eq clause).
+        body: { filter: { op: "eq", field: "title", value: "hello" } },
       });
       expect(calls[7]).toMatchObject({
         method: "GET",
